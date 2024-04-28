@@ -1,0 +1,117 @@
+parallel{
+                 Mov-106-[0, 0]-64
+                 CIM.read_row-[0, 64]-[0, 0]
+        }
+        parallel{
+                 Mov-170-[0, 0]-64
+                 CIM.read_row-[64, 128]-[0, 0]
+        }
+        parallel{
+                 Mov-[0]-490-64
+                 Mov-234-[0, 0]-64
+                 CIM.read_row-[0, 64]-[0, 0]
+        }
+        parallel{
+                 Mov-298-[0, 0]-64
+                 CIM.read_row-[64, 128]-[0, 0]
+        }
+flow{
+        parallel{
+                 Mov-[0]-554-64
+                 Mov-362-[0, 0]-64
+                 CIM.read_row-[0, 64]-[0, 0]
+        }
+                 Relu-64-682-874
+}
+flow{
+        parallel{
+                 Mov-426-[0, 0]-64
+                 CIM.read_row-[64, 128]-[0, 0]
+        }
+        parallel{
+                 Mov-874-[1, 1]-64
+                 CIM.read_row-[0, 64]-[1, 1]
+        }
+}
+flow{
+                 Mov-[0]-618-64
+                 Relu-64-746-938
+        parallel{
+                 Mov-938-[1, 1]-64
+                 CIM.read_row-[64, 128]-[1, 1]
+        }
+}
+flow{
+                 Add-490-0-192-64-0
+        parallel{
+                 Mov-[1]-1066-32
+                 Mov-938-[1, 1]-64
+                 CIM.read_row-[0, 64]-[1, 1]
+        }
+}
+flow{
+                 Relu-64-810-1002
+        parallel{
+                 Mov-1002-[1, 1]-64
+                 CIM.read_row-[64, 128]-[1, 1]
+        }
+}
+flow{
+        parallel{
+                 Mov-[1]-1098-32
+                 Mov-1002-[1, 1]-64
+                 CIM.read_row-[0, 64]-[1, 1]
+        }
+                 Relu-32-1162-1258
+}
+flow{
+        parallel{
+                 Mov-1066-[1, 1]-64
+                 CIM.read_row-[64, 128]-[1, 1]
+        }
+        parallel{
+                 Mov-1258-[2, 2]-32
+                 CIM.read_row-[0, 64]-[2, 2]
+        }
+}
+flow{
+                 Mov-[1]-1130-32
+                 Relu-32-1194-1290
+        parallel{
+                 Mov-1322-[2, 2]-32
+                 CIM.read_row-[64, 128]-[2, 2]
+        }
+}
+flow{
+                 Add-1066-64-96-32-64
+        parallel{
+                 Mov-[2]-1354-10
+                 Mov-1290-[2, 2]-32
+                 CIM.read_row-[0, 64]-[2, 2]
+        }
+}
+flow{
+                 Relu-32-1226-1322
+        parallel{
+                 Mov-1354-[2, 2]-32
+                 CIM.read_row-[64, 128]-[2, 2]
+        }
+}
+flow{
+        parallel{
+                 Mov-[2]-1364-10
+                 Mov-1322-[2, 2]-32
+                 CIM.read_row-[0, 64]-[2, 2]
+        }
+                 Sigmoid-10-1384-1414
+}
+        parallel{
+                 Mov-1386-[2, 2]-32
+                 CIM.read_row-[64, 128]-[2, 2]
+        }
+flow{
+                 Mov-[2]-1374-10
+                 Sigmoid-10-1394-1424
+}
+                 Add-1354-96-30-10-96
+                 Sigmoid-10-1404-1434

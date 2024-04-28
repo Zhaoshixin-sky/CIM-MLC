@@ -1,0 +1,5 @@
+torch
+onnx==1.13.0
+onnxruntime==1.14.0
+numpy
+einops

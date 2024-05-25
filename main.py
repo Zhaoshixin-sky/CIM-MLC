@@ -38,7 +38,7 @@ def initialize(onnx_model_path, ifmsize, arch_config):
     return CIM, onnx_model, initializer, const_node_output
 
 
-def main(onnx_model_path, ifmsize, arch_config, output_dir):
+def main(onnx_model_path, ifmsize, input_precision, weight_precision, arch_config, output_dir):
     # Initialize components
     CIM, onnx_model, initializer,const_node_output = initialize(onnx_model_path, ifmsize, arch_config)
 
@@ -50,7 +50,7 @@ def main(onnx_model_path, ifmsize, arch_config, output_dir):
     # Set up Core config params in CIM
     core_mapping = CoreVirtualMapping(CIM)
     # Map each node based on Core hardware config (add attr to node fields)
-    core_mapping.get_mapping_attributes(onnx_model, ifmsize)
+    core_mapping.get_mapping_attributes(onnx_model, ifmsize, input_precision, weight_precision)
     # Pass Core count in CIM for operator duplication
     core_dup = CoreWiseDuper(len(CIM.core))
 
@@ -103,6 +103,10 @@ if __name__ == "__main__":
     parser.add_argument("-onnx_model_path", type=str, help="Path to the ONNX model file")
     parser.add_argument("--ifmsize", type=int, nargs="+", default=[1, 3, 32, 32],
                         help="Size of the input feature map (default: 1 3 32 32)")
+    parser.add_argument("--input_precision",type=int,default=8,
+                        help="Input activation precision for the model (default: 8)")
+    parser.add_argument("--weight_precision",type=int,default=8,
+                        help="Weight precision for the model (default: 8)")
     parser.add_argument("--arch_config_module", type=str, default="configs.default_config",
                         help="Python module containing the CIM architecture configuration (default: configs.default_config)")
     parser.add_argument("--output_dir", type=str, help="Directory to save the output files")
@@ -116,4 +120,4 @@ if __name__ == "__main__":
     arch_config = arch_config_module.ArchTem
 
     # Run main function
-    main(args.onnx_model_path, ifmsize, arch_config, args.output_dir)
+    main(args.onnx_model_path, ifmsize, args.input_precision, args.weight_precision, arch_config, args.output_dir)

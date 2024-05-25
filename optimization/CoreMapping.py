@@ -8,8 +8,9 @@ class CoreVirtualMapping:
         self.core_size = len(CIM.core[0].xb)  # Number of xbs per core
         self.xb_size = CIM.core[0].xb[0].Size  # Size of a single xb [num_xbr, num_xbc]
         self.xb_bus = CIM.core[-1].LCBufBW  # Buffer bandwidth per core
+        self.cell_precision = CIM.core[0].xb[0].device.Precision
 
-    def virtual_mapping_conv(self, node):
+    def virtual_mapping_conv(self, node, input_precision, weight_precision):
         k =  get_attribute(node,'kernel_shape')[0]
         ifm = get_attribute(node,'ifmsize')
         ofm = get_attribute(node,'ofmsize')
@@ -17,11 +18,11 @@ class CoreVirtualMapping:
         # Calculate the number of required xb rows based on the kernel size and IFM depth( xbr = (k * k * C_in) / num_xbr )
         xbr = math.ceil(k * k * ifm[1] / self.xb_size[0])
         # Calculate the number of required xb columns based on the OFM depth( xbc = C_out / num_xbc )
-        xbc = math.ceil(ofm[1] / self.xb_size[1])
+        xbc = math.ceil(ofm[1]*weight_precision / self.xb_size[1]/self.cell_precision)
         # Calculate the number of required cores based on the xb rows and columns(core_num = (xbr * xbc) / core_size)
         r = math.ceil(xbr * xbc / self.core_size)
         # Calculate the latency based on the OFM size and a fixed coefficient(c = W_out * H_out * 8)
-        c = ofm[2] * ofm[3] * 8
+        c = ofm[2] * ofm[3] * input_precision
         # Calculate the maximum duplication based on the core's buffer bandwidth and kernel size( max_dup = xb_bus / ( k * k * C_in ) )
         max_dup = max(math.floor(self.xb_bus / (k * k * ifm[1])), 1)
 
@@ -46,23 +47,23 @@ class CoreVirtualMapping:
         node.attribute.insert(-1,attrr)
         node.attribute.insert(-1,attrc)
 
-    def virtual_mapping_matmul(self,node):
+    def virtual_mapping_matmul(self,node, input_precision, weight_precision):
         ifm = get_attribute(node,'ifmsize')
         ofm = get_attribute(node,'ofmsize')
         # c = M = H_in、N = W_in、K = W_out
         M,N,K = ifm[-2],ifm[-1],ofm[-1]
-        c = M
+        c = M*input_precision
         # Adjust crossbar dimensions for non-standard MatMul inputs(like 2D matrixs).
         if node.op_type == 'MatMul' and len(ifm) != 3:
             # Calculate xb rows and columns based on batch size, input channels, and crossbar size.
             xbr = math.ceil(N * ifm[1] / self.xb_size[0])
-            xbc = math.ceil(K * ofm[1] / self.xb_size[1])
+            xbc = math.ceil(K * ofm[1]*weight_precision / self.xb_size[1]/self.cell_precision)
             # Calculate required cores based on adjusted xb rows and columns.
             r = math.ceil(xbr * xbc / self.core_size)
         else:
             # Calculate xb rows and columns without considering batch size or channels.
             xbr = math.ceil(N / self.xb_size[0])
-            xbc = math.ceil(K / self.xb_size[1])
+            xbc = math.ceil(K*weight_precision / self.xb_size[1]/self.cell_precision)
             r = math.ceil(xbr * xbc / self.core_size)
 
         attrcore = onnx.helper.make_attribute("core_num",r)
@@ -72,7 +73,7 @@ class CoreVirtualMapping:
         node.attribute.insert(-1,attrcore)
         node.attribute.insert(-1,attrc)
 
-    def get_mapping_attributes(self,onnx_model,ifmsize):
+    def get_mapping_attributes(self,onnx_model,ifmsize, input_precision, weight_precision):
         # Handle the special case for the first node
         first_node = onnx_model.graph.node[0]
         ifm_size_attr = get_attribute(first_node, 'ifmsize')
@@ -84,12 +85,12 @@ class CoreVirtualMapping:
         for node_id, node in enumerate(onnx_model.graph.node):
             if node.op_type == 'Conv':
                 # Compute Conv node attributes: core_num, xb_num, latency, max_dup
-                self.virtual_mapping_conv(node)
+                self.virtual_mapping_conv(node, input_precision, weight_precision)
             elif node.op_type in ['MaxPool', 'AveragePool']:
                 # Compute Pooling node attributes: core_num, latency
                 self.virtual_mapping_pool(node)
             elif node.op_type in ['MatMul', 'Gemm']:
                 # Compute MatMul/Gemm node attributes: core_num, xb_num, latency
-                self.virtual_mapping_matmul(node)
+                self.virtual_mapping_matmul(node, input_precision, weight_precision)
 
 

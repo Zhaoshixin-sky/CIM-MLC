@@ -6,7 +6,6 @@ The following diagram shows the workflow of MLC-CIM.
 
 Specifically, we use hardware abstraction to provide the same description format of architecture parameters and computing mode for the various CIM designs. To decouple the data mapping and computing scheduling with one architectural design, we propose multi-level scheduling technology to handle the computing mode for different architectural tiers in the CIMs. The multi-level scheduler tailors the optimization method for each computing mode, applies the optimization method independently or jointly according to the abstraction of the CIM accelerator, and finally generates the meta-operator flow for the CIM accelerator.
 
-**Kindly reminder, this repository is just a beta version. The complete compilation tools and model testing results will be released subsequently.**
 ## Getting Started
 ### Requirements
 ```
@@ -98,6 +97,8 @@ Optional arguments:
   --output_dir OUTPUT_DIR       specify the directory to save the output files 
 
 ```
+
+**Kindly reminder, this repository is just a beta version. The complete compilation tools and model testing results will be released subsequently.**
 
 ## Acknowledgements
 * [ONNX](https://github.com/onnx/onnx)

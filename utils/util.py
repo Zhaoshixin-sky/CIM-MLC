@@ -150,6 +150,7 @@ def GetOPtype(node):
         'Relu':'ActivFunc',
         'Sigmoid':'ActivFunc',
         'Tanh':'ActivFunc',
+        'Erf': 'ActivFunc',
         'Softmax':'Softmax',
         'Sqrt':'Sqrt',
         'ReduceMean':'ReduceMean',
@@ -161,9 +162,20 @@ def GetOPtype(node):
         'Sub':'ALUop',
         'Pow':'ALUop',
         'Div':'ALUop',
+        'Equal':'ALUop',#  Let's do it this way for now.
         'Concat':'Concat',
         'Constant': 'Constant',
-        'pad':'pad'
+        'ConstantOfShape': 'ConstantOfShape',
+        'Shape': 'Shape',
+        'pad':'pad',
+        'Slice':'Slice',
+        'Expand':'Expand',
+        'Gather':'Gather',
+        'Transpose':'Transpose',
+        'Reshape':'Reshape',
+        'Unsqueeze':'Unsqueeze',
+        'Flatten':'Flatten',
+        'Where':'Where' #  do it this way for now.
     }
     if node.op_type in op_type:
         return op_type[node.op_type]
@@ -192,66 +204,124 @@ def GetInputNum(node):
         'Div':2,
         'Concat':2,
         'pad':2,
-        'Constant':0
-        
+        'Constant':0,
+        'Where':3,
+        'Reshape':2,
+        'Equal':2,
+        'Shape':1,
+        'ConstantOfShape':1,
+        'Gather':2,
+        'Expand':2,
+        'Slice':5,
+        'Transpose':1,
+        'Unsqueeze':2,
+        'Flatten':1
     }
     if node.op_type in input_num:
         return input_num[node.op_type]
     else:
         return None
 
-def GetInputOP(onnx_model,node_id):
+def GetInputOP(onnx_model, node_id):
+    # Get the node from the ONNX model by its ID.
     node = onnx_model.graph.node[node_id]
+    # Determine the number of inputs expected for this node.
     InputNum = GetInputNum(node)
+    # Initialize a list to hold the source tensor IDs.
     SrcTensor = []
+    # Attempt to get the 'srctensor' attribute from the node.
     src = get_attribute(node, 'srctensor')
+    # If there is no 'srctensor' attribute or it is empty, return an empty list.
     if src is None or len(src) == 0:
-    # if len(src) == 0:
         return SrcTensor
+    # Initialize a set to keep track of visited nodes and a queue for BFS traversal.
     visited = set()
     queue = deque([node_id])
+    # Perform BFS traversal to find all input nodes.
     while queue:
+        # Dequeue a node ID from the front of the queue.
         tmp_node_id = queue.popleft()
+        # Get the corresponding node from the model.
         tmp_node = onnx_model.graph.node[tmp_node_id]
+        # Mark the node as visited.
         visited.add(tmp_node_id)
+        # Get the 'srctensor' attribute of the current node.
         src = get_attribute(tmp_node, 'srctensor')
+        # If there is no 'srctensor' attribute or it is empty, return the current SrcTensor list.
         if src is None or len(src) == 0:
             return SrcTensor
+        # Iterate over each source tensor ID in the 'srctensor' attribute.
         for i in src:
+            # Get the adjacent node from the model.
             adjacent_node = onnx_model.graph.node[i]
+            # Check if the operation type of the adjacent node is supported.
             support = GetOPtype(adjacent_node)
+            # If the operation type is supported, add the node ID to SrcTensor.
             if support:
                 SrcTensor.append(i)
-                if len(SrcTensor)==InputNum:
+                # If we have found all expected input nodes, return SrcTensor.
+                if len(SrcTensor) == InputNum:
                     return SrcTensor
+            # If the node has not been visited and is not a supported operation, enqueue it for further traversal.
             elif i not in visited:
                 queue.append(i)
                 visited.add(i)
+    # Return the SrcTensor list with all found input node IDs.
     return SrcTensor
+
+
+# def GetFMSize(onnx_model,ort_outs,ifm_size):
+#     for node_id,node in enumerate(onnx_model.graph.node):
+#         # get input & output feature map size
+#         ofmsize = ort_outs[node.output[0]].shape
+#         if len(ofmsize)>=2:# Don't add the ofmsize attribute if  ofmsize of the node is 1-dimensional or 0-dimensional,
+#             attrofm = onnx.helper.make_attribute("ofmsize",ofmsize)
+#             node.attribute.insert(-1,attrofm)
+#         # Record input dimensions for each node and add them as attributes in ifmsize format
+#         for inp in node.input:
+#             # Take the input name of the node, which is the output of another node, and treat the data as a feature map.
+#             # In ONNX, usually, if a node has multiple inputs, only the first is a input feature map tensor (see https://onnx.ai/onnx/operators/onnx__Conv.html#l-onnx-doc-conv)
+#             if inp in ort_outs.keys():
+#                 ifmsize = ort_outs[inp].shape
+#                 if len(ifmsize)>=2:# Don't add the ifmsize attribute if ifmsize of the node is 1-dimensional or 0-dimensional
+#                     attrifm = onnx.helper.make_attribute("ifmsize",ifmsize)
+#                     node.attribute.insert(-1,attrifm)
+#             # If inp is "input", it means that the node is the first node, so the passed ifmsize (function parameter) is used
+#             elif inp=='input':
+#                 ifmsize = ifm_size
+#                 attrifm = onnx.helper.make_attribute("ifmsize",ifmsize)
+#                 node.attribute.insert(-1,attrifm)
 
 def GetFMSize(onnx_model,ort_outs,ifm_size):
     for node_id,node in enumerate(onnx_model.graph.node):
         # get input & output feature map size
-        ofmsize = ort_outs[node.output[0]].shape
-        if len(ofmsize)>=2:
+        ofmsize,ofm_data_num = ort_outs[node.output[0]].shape,ort_outs[node.output[0]].size
+        if len(ofmsize) > 0:# Don't add the ofmsize attribute if  ofmsize of the node is 0-dimensional,
             attrofm = onnx.helper.make_attribute("ofmsize",ofmsize)
             node.attribute.insert(-1,attrofm)
+        elif len(ofmsize)==0 and ofm_data_num > 0:
+            attrofm = onnx.helper.make_attribute("ofmsize", [ofm_data_num])
+            node.attribute.insert(-1, attrofm)
+
         # Record input dimensions for each node and add them as attributes in ifmsize format
         for inp in node.input:
             # Take the input name of the node, which is the output of another node, and treat the data as a feature map.
-            # In ONNX, a Conv node has 3 input attributes, only the first is a feature map tensor (see https://onnx.ai/onnx/operators/onnx__Conv.html#l-onnx-doc-conv)
+            # In ONNX, usually, if a node has multiple inputs, only the first is a input feature map tensor (see https://onnx.ai/onnx/operators/onnx__Conv.html#l-onnx-doc-conv)
             if inp in ort_outs.keys():
-                ifmsize = ort_outs[inp].shape
-                if len(ifmsize)>=2:
+                ifmsize,ifm_data_num = ort_outs[inp].shape,ort_outs[inp].size
+                if len(ifmsize) > 0:# Don't add the ifmsize attribute if ifmsize of the node is 0-dimensional
                     attrifm = onnx.helper.make_attribute("ifmsize",ifmsize)
                     node.attribute.insert(-1,attrifm)
-            # If inp is "input", it's the first node, so use the passed ifmsize as the input feature map
+                elif len(ifmsize) == 0 and ifm_data_num > 0:
+                    attrifm = onnx.helper.make_attribute("ifmsize", [ifm_data_num])
+                    node.attribute.insert(-1, attrifm)
+            # If inp is "input", it means that the node is the first node, so the passed ifmsize (function parameter) is used
             elif inp=='input':
                 ifmsize = ifm_size
                 attrifm = onnx.helper.make_attribute("ifmsize",ifmsize)
                 node.attribute.insert(-1,attrifm)
 
-def GetDependency(onnx_model,initializer):
+def GetDependency(onnx_model,initializer,ort_outs):
     input_record = []
     output_record = []
     connection = []
@@ -284,11 +354,148 @@ def GetDependency(onnx_model,initializer):
                     attrinitsrc = onnx.helper.make_attribute("srcinit",name)
                     node.attribute.insert(-1,attrinitsrc)
 
+def GetSpecAttrs(onnx_model,ort_outs):
+    for node_id, node in enumerate(onnx_model.graph.node):
+        if node.op_type == 'Gather':
+            indices = ort_outs[node.input[1]]
+            if len(indices.shape) == 0:
+            # and len(ort_outs[node.input[0]].shape) == 1:
+                indices = [0]
+            # print(indices)
+            # print(node.input)
+            # print([ort_outs[node.input[0]],ort_outs[node.input[1]]])
+            attr_indices = onnx.helper.make_attribute("indices", indices)
+            node.attribute.insert(-1, attr_indices)
+        if node.op_type == 'Slice':
+            starts = ort_outs[node.input[1]]
+            ends = ort_outs[node.input[2]]
+            attr_starts = onnx.helper.make_attribute("starts", starts)
+            attr_ends = onnx.helper.make_attribute("ends", ends)
+            node.attribute.append(attr_starts)
+            node.attribute.append(attr_ends)
+
+            if len(node.input) > 3:
+                axes = ort_outs[node.input[3]]
+                attr_axes = onnx.helper.make_attribute("axes", axes)
+                node.attribute.append(attr_axes)
+            if len(node.input) > 4:
+                steps = ort_outs[node.input[4]]
+                attr_steps = onnx.helper.make_attribute("steps", steps)
+                node.attribute.append(attr_steps)
+        if node.op_type == 'Gather':
+            for inp in node.input:
+                if inp in ort_outs.keys() and inp == 'output':
+                    inp_shape = ort_outs[inp].shape
+                    attr_inp = onnx.helper.make_attribute("inp_shape", inp_shape)
+                    node.attribute.append(attr_inp)
+        if node.op_type == 'Unsqueeze':
+            for inp in node.input:
+                if inp in ort_outs.keys():
+                    axes = ort_outs[inp]
+                    axes = axes.reshape(1) if len(axes.shape)==0 else axes
+                    attr_axes = onnx.helper.make_attribute("axes", axes)
+                    node.attribute.append(attr_axes)
+
+def GetConstOutput(onnx_model,ort_outs):
+    const_node_output = {}
+    for node_id, node in enumerate(onnx_model.graph.node):
+        if node.op_type == 'Constant':
+            shape_attr = get_attribute(node,'ofmsize')
+            v_attr = get_attribute(node,'value')
+            data_type = onnx.mapping.TENSOR_TYPE_TO_NP_TYPE[v_attr.data_type]
+            value = v_attr.raw_data
+            # Convert the raw_data to a numpy array based on the data type
+            np_value = np.frombuffer(value, dtype=data_type)
+            const_node_output[node_id] = {'name':node.output[0], 'data_type':data_type,'shape': shape_attr, 'value': np_value}
+    return const_node_output
+# def GetShape(onnx_model,initializer,ort_outs):
+#     input_record = []
+#     output_record = []
+#     connection = []
+#
+#
+#     for node_id,node in enumerate(onnx_model.graph.node):
+#         if node.op_type == 'Reshape':
+#             OpSrc = GetInputOP(onnx_model, node_id)
+#             if len(node.input) == 2:
+#                 ifm_shape = ort_outs[node.input][0]
+#                 ofm_shape = ort_outs[node.input][-1]
+#                 if len(ofm_shape) == 1 and ofm_shape[0] == -1:
+#
+#
+#             # self.initializer[get_attribute(node, 'srcinit').decode("utf-8")]['shape']
+#             # get the dependency relation of operators
+#             input_record.append(node.input)
+#             output_record.append(node.output)
+#             connection.append([])
+#
+#             # Get the input name of the current node
+#             inp_name = input_record[node_id]
+#             # Check if current node's inputs depend on previous nodes' outputs
+#             for i in range(len(output_record)):
+#                 for j in output_record[i]:
+#                     if j in inp_name:
+#                         connection[node_id].append(i)
+#             # If there are dependencies, add an attribute to the node
+#             if connection[node_id]:
+#                 attrsrc = onnx.helper.make_attribute("srctensor", connection[node_id])
+#                 node.attribute.insert(-1, attrsrc)
+#
+#             # Get standard number of inputs for the current node
+#             InpNum = GetInputNum(node)
+#             # If the node has fewer dependencies than expected inputs
+#             if InpNum and len(connection[node_id])<InpNum:
+#                 # Check if any inputs are initializers (e.g. features.0.weight, in the initializer list)
+#                 for name in node.input:
+#                     if name in initializer:
+#                         # If input is an initializer, add "srcinit" attribute to the node
+#                         attrinitsrc = onnx.helper.make_attribute("srcinit",name)
+#                         node.attribute.insert(-1,attrinitsrc)
+
 def PreProcess(onnx_model,ort_outs,ifm_size):
     # Extract initializers and constant tensors(in model.graph.initializers) from the model
     initializer = extract_initializer_value(onnx_model)
     # Add feature map size attributes to nodes
     GetFMSize(onnx_model,ort_outs,ifm_size)
     # Add dependency attributes to nodes
-    GetDependency(onnx_model,initializer)
-    return initializer
+    GetDependency(onnx_model,initializer,ort_outs)
+    # Add perm attribute to reshape nodes
+    GetSpecAttrs(onnx_model,ort_outs)
+    # extract outputs value of Constant nodes  (in ort_orts)
+    const_node_output = GetConstOutput(onnx_model,ort_outs)
+    return initializer,const_node_output
+
+
+def image_to_input_ids(image_data):
+    """
+    Convert image data to a serialized form of input_ids.
+
+    Parameters:
+        image_data (np.ndarray): A batch of images with shape [batch, num_channels, height, width]
+                                 and dtype float.
+
+    Returns:
+        input_ids (np.ndarray): A batch of images with shape [batch, seq_length]
+                                 and dtype int64.
+    """
+    input_ids = (image_data * 255).astype(np.int64)
+    input_ids = input_ids.reshape(input_ids.shape[0], -1)  # Flatten all dimensions except the batch dimension
+
+    return input_ids
+
+def image_to_attention_mask(image_data):
+    """
+    Convert image data to a serialized form of attention_mask.
+
+    Parameters:
+        image_data (np.ndarray): A batch of images with shape [batch, num_channels, height, width]
+                                 and dtype float.
+
+    Returns:
+        attention_mask (np.ndarray): A batch of images with shape [batch, seq_length]
+                                 and dtype int64.
+    """
+    attention_mask = np.ones_like(image_data, dtype=np.int64)
+    attention_mask = attention_mask.reshape(attention_mask.shape[0], -1)  # Flatten all dimensions except the batch dimension
+
+    return attention_mask

@@ -59,20 +59,20 @@ def mul_start_time_retrieval(onnx_model, node, OpSrc,ifmsize):
     source_data_fetch_time = []
     # Initialize or retrieve cycle records for operations
     if len(OpSrc) == 0:
-        source_data_fetch_time = [0] * reduce(mul, ifmsize[1:])
+        source_data_fetch_time = [0] * reduce(mul, ifmsize[:])
     else:
         for i in OpSrc:
-            if len(get_attribute(onnx_model.graph.node[i], 'rc_cycle_record')) == reduce(mul, ifmsize[1:]):
+            if len(get_attribute(onnx_model.graph.node[i], 'rc_cycle_record')) == reduce(mul, ifmsize[:]):
                 source_data_fetch_time = get_attribute(onnx_model.graph.node[i], 'rc_cycle_record')
 
     # Initialization of start time for segmented network. Segmented network cannot undergo pipeline.
     CoreAddr = get_attribute(node, "corestart")
-    if CoreAddr == 0:
+    if CoreAddr == 0 and source_data_fetch_time:
         source_data_fetch_time = [max(source_data_fetch_time)] * len(source_data_fetch_time)
 
     # exception
-    if len(source_data_fetch_time) == 0 or len(source_data_fetch_time) != reduce(mul, ifmsize[1:]):
-            source_data_fetch_time = [0] * reduce(mul, ifmsize[1:])
+    if len(source_data_fetch_time) == 0 or len(source_data_fetch_time) != reduce(mul, ifmsize[:]):
+            source_data_fetch_time = [0] * reduce(mul, ifmsize[:])
 
     return source_data_fetch_time
 
@@ -91,6 +91,11 @@ class RCWiseCodegen:
         self.activ_cycle = {}
         self.alu_cycle = {}
         self.softmax_cycle = {}
+        self.transform_cycle = {}
+        self.indexing_cycle = {}
+        self.where_cycle = {}
+        self.reduction_cycle = {}
+        self.elementwise_op_cycle = {}
         self.xb_cycle = {}
         self.test_number = 0
 
@@ -116,23 +121,35 @@ class RCWiseCodegen:
             self.process_aluOp_node_wlm(node, node_id, OpSrc)
         elif OPtype == 'Softmax':
             self.process_softmax_node_wlm(node, node_id, OpSrc)
+        elif OPtype == 'Reshape' or OPtype == 'Transpose' or OPtype == 'Expand' or OPtype == 'Unsqueeze' or OPtype == 'Flatten':
+            self.process_transform_node_wlm(node, node_id, OpSrc)
+        elif OPtype == 'Where':
+            self.process_where_node_wlm(node, node_id, OpSrc)
+        elif OPtype == 'ReduceMean':
+            self.process_reduction_node_wlm(node, node_id, OpSrc)
+        elif OPtype == 'Slice' or OPtype == 'Gather':
+            self.process_indexing_node_wlm(node, node_id, OpSrc)
+        elif OPtype == 'Sqrt' or OPtype == 'Abs' or OPtype == 'Exp' or OPtype == 'Log ':
+            self.process_elementwise_node_wlm(node, node_id, OpSrc)
+        elif OPtype == 'Shape' or 'Constant' or 'ConstantOfShape':
+            self.process_constant_node_wlm(node, node_id, OpSrc)
         else:
-            OpSrc = get_attribute(node, 'srctensor')
+            # OpSrc = get_attribute(node, 'srctensor')
             ofmsize = get_attribute(node, 'ofmsize')
-            if not OpSrc:
-                if ofmsize and len(self.source_data_fetch_time) != reduce(mul, ofmsize[1:]):
+            if not OpSrc:# If no source node
+                if ofmsize and len(self.source_data_fetch_time) != reduce(mul, ofmsize[:]):
                     if not self.source_data_fetch_time:
-                        self.source_data_fetch_time = [0] * reduce(mul, ofmsize[1:])
-                    else:
-                        self.source_data_fetch_time = [max(self.source_data_fetch_time)] * reduce(mul, ofmsize[1:])
+                        self.source_data_fetch_time = [0] * reduce(mul, ofmsize[:])
+                    else: # If SrcOp's ofm_size differs from current Op's, take the latest ready time from SrcOp and reshape to match current Op's ofm_size
+                        self.source_data_fetch_time = [max(self.source_data_fetch_time)] * reduce(mul, ofmsize[:])
                 attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
                 node.attribute.insert(-1, attrcycle)
             else:
                 rc_cycle_record_attr = get_attribute(self.onnx_model.graph.node[OpSrc[0]], 'rc_cycle_record')
                 if rc_cycle_record_attr is not None and len(rc_cycle_record_attr) > 0:
                     self.source_data_fetch_time = get_attribute(self.onnx_model.graph.node[OpSrc[0]], 'rc_cycle_record')
-                    if ofmsize and len(self.source_data_fetch_time) != reduce(mul, ofmsize[1:]):
-                        self.source_data_fetch_time = [max(self.source_data_fetch_time)] * reduce(mul, ofmsize[1:])
+                    if ofmsize and len(self.source_data_fetch_time) != reduce(mul, ofmsize[:]):
+                        self.source_data_fetch_time = [max(self.source_data_fetch_time)] * reduce(mul, ofmsize[:])
                     attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
                     node.attribute.insert(-1, attrcycle)
 
@@ -388,7 +405,8 @@ class RCWiseCodegen:
         K = get_attribute(node, 'kernel_shape')
         P = get_attribute(node, 'pads')
         S = get_attribute(node, 'strides')
-
+        if P is None or len(P) == 0:#  If not present, the padding defaults to 0 along start and end of each spatial axis.
+            P = len(thisifmsize) * [0]
         memoryaddr = get_attribute(node, 'memoryaddr')
         if not memoryaddr or len(memoryaddr) < 2:
             print(f"Exception: 'memoryaddr' attribute is missing or incomplete in node {node.name}. Skipping this node.")
@@ -424,7 +442,7 @@ class RCWiseCodegen:
 
             mov_inst = MovTmpl.format(source=td,
                             destination=ts,
-                            length=reduce(mul, get_attribute(node, 'ifmsize')[1:]))
+                            length=reduce(mul, get_attribute(node, 'ifmsize')[:]))
             inst_record_update(self.mov_cycle,max_cycle+1,node_id,mov_inst)
 
     def process_activFunc_node_wlm(self, node, node_id, OpSrc):
@@ -473,7 +491,7 @@ class RCWiseCodegen:
 
         # Softmax needs max fetch_time from all ifm elements for global normalization
         max_fetch_time = max(self.source_data_fetch_time)
-        cycle_record = len(self.source_data_fetch_time) * (max_fetch_time+ 3.0)
+        cycle_record = len(self.source_data_fetch_time) * [max_fetch_time+ 3.0]
 
         self.source_data_fetch_time = cycle_record
         attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
@@ -484,6 +502,10 @@ class RCWiseCodegen:
         inst_record_update(self.softmax_cycle,max_fetch_time,node_id,softmax_inst)
 
     def process_aluOp_node_wlm(self, node, node_id, OpSrc):
+        # Initialize inp1 and inp2 to None or some default value
+        inp1 = None
+        inp2 = None
+
         ofmsize = get_attribute(node, 'ofmsize')
         if len(OpSrc) > 1:
             tmp_record1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "rc_cycle_record")
@@ -492,6 +514,8 @@ class RCWiseCodegen:
             tmp_record1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "rc_cycle_record")
             tmp_record2 = [0]
         td = get_attribute(node, 'memoryaddr')[1]
+
+        # print(f"Node: {node.name}, Node ID: {node_id}, OpSrc: {OpSrc}, tmp_record1: {tmp_record1}, tmp_record2: {tmp_record2}")
 
         if len(tmp_record1) == len(tmp_record2):
             cycle_record = np.maximum(np.array(tmp_record1, dtype=int) + 3,
@@ -517,7 +541,7 @@ class RCWiseCodegen:
         if len(cycle_record) > 0:
             self.source_data_fetch_time = list(np.array(cycle_record))
         elif ofmsize:
-            self.source_data_fetch_time = list(np.array([0] * reduce(mul, ofmsize[1:])))
+            self.source_data_fetch_time = list(np.array([0] * reduce(mul, ofmsize[:])))
         attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
         node.attribute.insert(-1, attrcycle)
 
@@ -531,15 +555,15 @@ class RCWiseCodegen:
                 alu_inst = ALUopTmpl.format(op_type = node.op_type,
                                      input_source1 = bufsrc1,
                                      input_source2 = bufsrc2,
-                                     input_length1 = reduce(mul, inp1[1:]),
-                                     input_length2 = reduce(mul, inp2[1:]),
+                                     input_length1 = reduce(mul, inp1[:]),
+                                     input_length2 = reduce(mul, inp2[:]),
                                      destination = td)
             else:
                 inp2 = self.initializer[get_attribute(node, 'srcinit').decode("utf-8")]['shape']
                 alu_inst = ALUopTmpl.format(op_type = node.op_type,
                                      input_source1 = bufsrc1,
                                      input_source2 = bufsrc2,
-                                     input_length1 = reduce(mul, inp1[1:]),
+                                     input_length1 = reduce(mul, inp1[:]),
                                      input_length2 = reduce(mul, inp2),
                                      destination = td)
 
@@ -551,6 +575,269 @@ class RCWiseCodegen:
         if inp1 and inp2:
             inst_record_update(self.alu_cycle, max_cycle, node_id,alu_inst)
 
+    def process_constant_node_wlm(self, node, node_id, OpSrc):
+        OfmSize = get_attribute(node, 'ofmsize')
+        if node.op_type == "Constant":# Constant
+            cycle_record = reduce(mul, OfmSize[:]) * [0] # constant value is ready from cycle 0 to the end
+        else:# Shape, ConstantOfShape, etc.
+            if node.input[0] == 'input':
+                cycle_record = reduce(mul, OfmSize[:]) * [0]  # 'input' value is ready from cycle 0 to the end
+            else:
+                cycle_record = torch.tensor(
+                    self.source_data_fetch_time) + 0  # consider no computation in Shape,ConstantOfShape nodes
+                cycle_record = cycle_record.int().tolist()
+
+        self.source_data_fetch_time = cycle_record
+        attrcycle = onnx.helper.make_attribute("cycle_record", self.source_data_fetch_time)
+        node.attribute.insert(-1, attrcycle)
+
+    def process_where_node_wlm(self,node,node_id,OpSrc):
+        inp1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "ofmsize")
+        inp2 = get_attribute(self.onnx_model.graph.node[OpSrc[1]], "ofmsize")
+        inp3 = get_attribute(self.onnx_model.graph.node[OpSrc[2]], "ofmsize")
+        bufsrc = get_attribute(node, 'memoryaddr')[:-1]
+        bufdst = get_attribute(node, 'memoryaddr')[-1]
+
+        ofmsize = get_attribute(node, 'ofmsize')
+
+        inst = WhereTmpl.format(
+            input_source1=str(bufsrc[0]),
+            input_source2=str(bufsrc[1]),
+            input_source3=str(bufsrc[2]),
+            input_length1=str(reduce(mul, inp1[:])),
+            input_length2=str(reduce(mul, inp2[:])),
+            input_length3=str(reduce(mul, inp3[:])),
+            ofmsize=str(ofmsize),
+            destination=str(bufdst)
+        )
+
+        source_data_fetch_time_1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], 'cycle_record')
+        source_data_fetch_time_2 = get_attribute(self.onnx_model.graph.node[OpSrc[1]], 'cycle_record')
+        source_data_fetch_time_3 = get_attribute(self.onnx_model.graph.node[OpSrc[2]], 'cycle_record')
+
+        # For transform-related operations, a maximum fetch_time from all ifm elements is required
+        max_fetch_time = max(source_data_fetch_time_1 + source_data_fetch_time_2 + source_data_fetch_time_3)
+        cycle_record = reduce(mul, ofmsize[:]) * [max_fetch_time+ 3.0]
+
+        self.source_data_fetch_time = cycle_record
+        attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
+        node.attribute.insert(-1, attrcycle)
+
+        inst_record_update(self.where_cycle,max_fetch_time,node_id,inst)
+
+
+    def process_elementwise_node_wlm(self, node, node_id, OpSrc):
+        memoryaddr = get_attribute(node, 'memoryaddr')
+        if not memoryaddr or len(memoryaddr) < 2:
+            print(
+                f"Exception: 'memoryaddr' attribute is missing or incomplete in node {node.name}. Skipping this node.")
+            return
+        ts = memoryaddr[0]  # BufSrc
+        td = memoryaddr[1]  # BufDst
+
+        self.source_data_fetch_time = get_attribute(self.onnx_model.graph.node[OpSrc[0]], 'cycle_record')
+
+        cycle_record = torch.tensor(self.source_data_fetch_time) + 3.0  # Element-wise result ready time is ifm fetch_time + 3 cycles
+        cycle_record = cycle_record.int().tolist()
+
+        self.source_data_fetch_time = cycle_record
+        attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
+        node.attribute.insert(-1, attrcycle)
+
+        time = set(self.source_data_fetch_time)  # # Unique ready times
+
+        # Generate activation instructions for each unique fetch time
+        for t in time:
+            begin = self.source_data_fetch_time.index(t)  # First occurrence of t
+            end = len(self.source_data_fetch_time) - 1 - self.source_data_fetch_time[::-1].index(t)  # Last occurrence of t
+
+            inst = ElementWiseTmpl.format(
+                op_type=node.op_type,
+                input_length=end - begin + 1,  # length = Consecutive occurrences of 't' in the list
+                input_source=ts + begin,
+                destination=td + begin
+            )
+
+            inst_record_update(self.activ_cycle, t, node_id, inst)
+
+    def process_indexing_node_wlm(self, node, node_id, OpSrc):
+        inst = None
+        memoryaddr = get_attribute(node, 'memoryaddr')
+        if not memoryaddr or len(memoryaddr) < 2:
+            print(
+                f"Exception: 'memoryaddr' attribute is missing or incomplete in node {node.name}. Skipping this node.")
+            return
+
+        bufsrc = get_attribute(node, 'memoryaddr')[:-1]
+        bufdst = get_attribute(node, 'memoryaddr')[-1]
+
+        if len(bufsrc) == 3:  # Slice
+            if len(OpSrc) == 2:
+                inp = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "ofmsize")
+                starts = get_attribute(node, "starts")
+                ends = get_attribute(node, "ends")
+                axes = get_attribute(node, "axes")
+                steps = get_attribute(node, "steps")
+                ofm = get_attribute(node, "ofmsize")
+
+                # Create the default axes list if axes is None
+                axes_str = str([i for i in range(len(inp))]) if axes is None else str(axes)
+                steps_str = '1' if steps is None else str(steps)
+
+                inst = SliceTmpl.format(
+                    input_source=str(bufsrc[0]),
+                    input_length=str(reduce(mul, inp[:])),
+                    ifmsize=str(inp),
+                    starts = str(starts),
+                    ends = str(ends),
+                    axes = axes_str,
+                    steps = steps_str,
+                    ofmsize=str(ofm),
+                    destination=str(bufdst)
+                )
+        else:  # Gather
+            if len(OpSrc) == 2:
+                inp = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "ofmsize")
+                indices = get_attribute(node, "indices")
+                axis = get_attribute(node, "axis")
+                ofm = get_attribute(node, "ofmsize")
+                if inp is None:
+                    inp = get_attribute(node, "inp_shape")
+                inst = GatherTmpl.format(
+                    input_source=str(bufsrc[0]),
+                    input_length=str(reduce(mul, inp[:])),
+                    ifmsize=str(inp),
+                    indices = str(indices),
+                    axis = str(axis),
+                    ofmsize=str(ofm),
+                    destination=str(bufdst)
+                )
+        self.source_data_fetch_time = get_attribute(self.onnx_model.graph.node[OpSrc[0]], 'cycle_record')
+
+        # For indexing operations, assume that the maximum fetch_time is obtained from all ifm elements
+        max_fetch_time = max(self.source_data_fetch_time)
+        cycle_record = len(self.source_data_fetch_time) * [max_fetch_time + 3.0]
+
+        self.source_data_fetch_time = cycle_record
+        attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
+        node.attribute.insert(-1, attrcycle)
+
+        inst_record_update(self.indexing_cycle, max_fetch_time, node_id, inst)
+
+    def process_reduction_node_wlm(self, node, node_id, OpSrc):
+        inp = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "ofmsize")  # data
+        axes = get_attribute(node, "axes")
+        ofmsize = get_attribute(node, 'ofmsize')
+
+        memoryaddr = get_attribute(node, 'memoryaddr')
+        if not memoryaddr or len(memoryaddr) < 2:
+            print(
+                f"Exception: 'memoryaddr' attribute is missing or incomplete in node {node.name}. Skipping this node.")
+            return
+        ts = memoryaddr[0]
+        td = memoryaddr[1]
+
+        inst = ReduceMeanTmpl.format(
+            input_source=str(ts),
+            input_length=str(reduce(mul, inp[:])),
+            ifmsize=str(inp),
+            axes=str(axes),
+            ofmsize=str(ofmsize),
+            destination=str(td)
+        )
+
+        self.source_data_fetch_time = get_attribute(self.onnx_model.graph.node[OpSrc[0]], 'cycle_record')
+        max_fetch_time = max(self.source_data_fetch_time)
+        cycle_record = len(self.source_data_fetch_time) * [max_fetch_time+ 3.0]
+
+        self.source_data_fetch_time = cycle_record
+        attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
+        node.attribute.insert(-1, attrcycle)
+
+        inst_record_update(self.reduction_cycle,max_fetch_time,node_id,inst)
+
+    def process_transform_node_wlm(self, node, node_id, OpSrc):
+        inst = None
+        memoryaddr = get_attribute(node, 'memoryaddr')
+        if not memoryaddr or len(memoryaddr) < 2:
+            print(
+                f"Exception: 'memoryaddr' attribute is missing or incomplete in node {node.name}. Skipping this node.")
+            return
+        ts = memoryaddr[:-1]
+        td = memoryaddr[-1]
+
+        if len(ts) == 1:  # transpose or flatten
+            if len(OpSrc) == 1:
+                inp = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "ofmsize")
+                ofm = get_attribute(node, "ofmsize")
+                if node.op_type == "Transpose":
+                    perm = get_attribute(node, "perm")
+                    inst = TransposeTmpl.format(
+                        input_source=str(ts[0]),
+                        input_length=str(reduce(mul, inp[:])),
+                        ifmsize=str(inp),
+                        perm=str(perm),
+                        ofmsize=str(ofm),
+                        destination=str(td)
+                    )
+                elif node.op_type == "Flatten":
+                    axis = get_attribute(node, "axis")
+                    inst = FlattenTmpl.format(
+                        input_source=str(ts[0]),
+                        input_length=str(reduce(mul, inp[:])),
+                        ifmsize=str(inp),
+                        axis=str(axis),
+                        ofmsize=str(ofm),
+                        destination=str(td)
+                    )
+        elif len(ts) == 2: # reshape, expand, or unsqueeze
+            OpSrc = GetInputOP(self.onnx_model, node_id)
+            if len(OpSrc) == 2:
+                inp = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "ofmsize")
+                ofm = get_attribute(node, "ofmsize")
+                if node.op_type =='Reshape': # Reshape
+                    inst = ReshapeTmpl.format(
+                        op_type = str(node.op_type),
+                        input_source = str(ts[0]),
+                        input_length = str(reduce(mul,inp[:])),
+                        ifmsize = str(inp),
+                        ofmsize = str(ofm),
+                        destination=str(td)
+                    )
+                elif node.op_type =='Expand':# Expad
+                    inst = ExpandTmpl.format(
+                        op_type = str(node.op_type),
+                        input_source = str(ts[0]),
+                        input_length = str(reduce(mul,inp[:])),
+                        ifmsize = str(inp),
+                        ofmsize = str(ofm),
+                        destination=str(td)
+                    )
+                elif node.op_type =='Unsqueeze':# Unsqueeze
+                    axes = get_attribute(node, "axes")
+                    inst = UnsqueezeTmpl.format(
+                        op_type = str(node.op_type),
+                        input_source = str(ts[0]),
+                        input_length = str(reduce(mul,inp[:])),
+                        ifmsize = str(inp),
+                        axes= axes,
+                        ofmsize = str(ofm),
+                        destination=str(td)
+                    )
+
+        self.source_data_fetch_time = get_attribute(self.onnx_model.graph.node[OpSrc[0]], 'cycle_record')
+
+        # For transform-related operations, a maximum fetch_time from all ifm elements is required
+        max_fetch_time = max(self.source_data_fetch_time)
+        cycle_record = len(self.source_data_fetch_time) * [max_fetch_time+ 3.0]
+
+        self.source_data_fetch_time = cycle_record
+        attrcycle = onnx.helper.make_attribute("rc_cycle_record", self.source_data_fetch_time)
+        node.attribute.insert(-1, attrcycle)
+
+        inst_record_update(self.transform_cycle,max_fetch_time,node_id,inst)
+
+    
     def generate_output_instructions(self):
         keys = []
         keys.extend(self.compute_cycle.keys())
@@ -622,6 +909,56 @@ class RCWiseCodegen:
                         print('\t}')
                     else:
                         for k in self.softmax_cycle[i][j]:
+                            print('\t\t', k)
+            if i in self.elementwise_op_cycle:
+                for j in self.elementwise_op_cycle[i]:
+                    if len(self.elementwise_op_cycle[i][j])>1:
+                        print('\tparallel{')
+                        for k in self.elementwise_op_cycle[i][j]:
+                            print('\t\t', k)
+                        print('\t}')
+                    else:
+                        for k in self.elementwise_op_cycle[i][j]:
+                            print('\t\t', k)
+            if i in self.indexing_cycle:
+                for j in self.indexing_cycle[i]:
+                    if len(self.indexing_cycle[i][j])>1:
+                        print('\tparallel{')
+                        for k in self.indexing_cycle[i][j]:
+                            print('\t\t', k)
+                        print('\t}')
+                    else:
+                        for k in self.indexing_cycle[i][j]:
+                            print('\t\t', k)
+            if i in self.reduction_cycle:
+                for j in self.reduction_cycle[i]:
+                    if len(self.reduction_cycle[i][j])>1:
+                        print('\tparallel{')
+                        for k in self.reduction_cycle[i][j]:
+                            print('\t\t', k)
+                        print('\t}')
+                    else:
+                        for k in self.reduction_cycle[i][j]:
+                            print('\t\t', k)
+            if i in self.transform_cycle:
+                for j in self.transform_cycle[i]:
+                    if len(self.transform_cycle[i][j])>1:
+                        print('\tparallel{')
+                        for k in self.transform_cycle[i][j]:
+                            print('\t\t', k)
+                        print('\t}')
+                    else:
+                        for k in self.transform_cycle[i][j]:
+                            print('\t\t', k)
+            if i in self.where_cycle:
+                for j in self.where_cycle[i]:
+                    if len(self.where_cycle[i][j])>1:
+                        print('\tparallel{')
+                        for k in self.where_cycle[i][j]:
+                            print('\t\t', k)
+                        print('\t}')
+                    else:
+                        for k in self.where_cycle[i][j]:
                             print('\t\t', k)
             if keys.count(i)>1:
                 print('}')

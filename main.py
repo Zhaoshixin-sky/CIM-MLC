@@ -33,14 +33,14 @@ def initialize(onnx_model_path, ifmsize, arch_config):
     ort_outs = get_layer_output(onnx_model, np.random.randn(*ifmsize).astype(np.float32))
 
     # Initialize PreProcess object
-    initializer = PreProcess(onnx_model, ort_outs, ifmsize)
+    initializer,const_node_output = PreProcess(onnx_model, ort_outs, ifmsize)
 
-    return CIM, onnx_model, initializer
+    return CIM, onnx_model, initializer, const_node_output
 
 
 def main(onnx_model_path, ifmsize, arch_config, output_dir):
     # Initialize components
-    CIM, onnx_model, initializer = initialize(onnx_model_path, ifmsize, arch_config)
+    CIM, onnx_model, initializer,const_node_output = initialize(onnx_model_path, ifmsize, arch_config)
 
     # Create output directory if not exist
     if output_dir:
@@ -63,14 +63,14 @@ def main(onnx_model_path, ifmsize, arch_config, output_dir):
     core_pipe.update_dup()
 
     # Generate address
-    addr_gen = AddrGenerator(onnx_model, CIM, initializer)
+    addr_gen = AddrGenerator(onnx_model, CIM, initializer,const_node_output)
     addr_gen.AddrGen()
 
     # Redirect stdout to output files if output_dir is specified
     if output_dir:
         sys.stdout = open(os.path.join(output_dir, 'corewise_codegen_output.txt'), 'w')
     # Generate code
-    coregen = CoreWiseCodegen(onnx_model, CIM, initializer, outinst=True)
+    coregen = CoreWiseCodegen(onnx_model, CIM, initializer,const_node_output,outinst=True)
     coregen.run()
     if ArchTem['API'] == 'Crossbar' or ArchTem['API'] == 'Wordline':
         '''PASS 3: Crossbar-Wise Duplication.'''
@@ -80,7 +80,7 @@ def main(onnx_model_path, ifmsize, arch_config, output_dir):
         '''PASS 4: Crossbar-Wise Pipeline.'''
         if output_dir:
             sys.stdout = open(os.path.join(output_dir, 'crossbarwise_codegen_output.txt'), 'w')
-        crossbarWiseCodegen = CrossbarWiseCodegen(onnx_model, CIM, initializer, outinst=True)
+        crossbarWiseCodegen = CrossbarWiseCodegen(onnx_model, CIM, initializer,outinst=True)
         crossbarWiseCodegen.run()
 
     # Row-wise pipeline
@@ -90,7 +90,7 @@ def main(onnx_model_path, ifmsize, arch_config, output_dir):
             sys.stdout = open(os.path.join(output_dir, 'rcwise_codegen_output.txt'), 'w')
         row = RowWisePipeline(onnx_model, CIM)
         row.process_row_wise_pipeline()
-        rcwiseCodegen = RCWiseCodegen(onnx_model, CIM, initializer, outinst=True)
+        rcwiseCodegen = RCWiseCodegen(onnx_model, CIM, initializer,outinst=True)
         rcwiseCodegen.run()
 
     # Restore stdout

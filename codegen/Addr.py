@@ -7,13 +7,14 @@ from utils.graph import *
 generate the global buffer address for supported operators    
 '''
 class AddrGenerator:
-    def __init__(self, onnx_model, CIM, initializer):
+    def __init__(self, onnx_model, CIM, initializer,const_node_output):
         self.onnx_model = onnx_model
         self.CIM = CIM
         self.initializer = initializer
         self.OpwithWeight = ['Conv', 'MatMul', 'Gemm']
         self.GBSize = CIM.GBBuf[0]
         self.BufSrc, self.BufDst = 0, 0
+        self.const_node_output = const_node_output
 
     def AddrGen(self):
         for name, attr in self.initializer.items():# Iterate through initializer items
@@ -27,6 +28,14 @@ class AddrGenerator:
                 self.initializer[name]['addr'] = self.BufDst
                 self.BufDst += reduce(mul, attr['shape'])
                 self.BufSrc += reduce(mul, attr['shape'])
+                self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+        for node_id,output in self.const_node_output.items():
+            # Allocate buffer address for const output items
+            self.const_node_output[node_id]['addr'] = self.BufDst
+            self.BufDst += reduce(mul, output['shape'])
+            self.BufSrc += reduce(mul, output['shape'])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
 
         for node_id, node in enumerate(self.onnx_model.graph.node):
             # get the input opeartor information
@@ -48,6 +57,26 @@ class AddrGenerator:
                 self.handle_concat(node, OpSrc)
             elif OPtype == 'Softmax':
                 self.handle_softmax(node, OpSrc)
+            elif OPtype == 'Where':
+                self.handle_where(node, OpSrc)
+            elif OPtype == 'Reshape':
+                self.handle_reshape(node, OpSrc)
+            elif OPtype == 'Expand':
+                self.handle_expand(node, OpSrc)
+            elif OPtype == 'Gather':
+                self.handle_gather(node, OpSrc)
+            elif OPtype == 'Transpose':
+                self.handle_transpose(node, OpSrc)
+            elif OPtype == 'Slice':
+                self.handle_slice(node, OpSrc)
+            elif OPtype == 'Unsqueeze':
+                self.handle_unsqueeze(node, OpSrc)
+            elif OPtype == 'Shape' or 'Constant' or 'ConstantOfShape':
+                self.handle_1D_Constant(node,node_id, OpSrc)
+            elif OPtype == 'Sqrt':
+                self.handle_sqrt(node, OpSrc)
+            elif OPtype == 'ReduceMean':
+                self.handle_reducemean(node, OpSrc)
             else:
                 self.handle_other(node, OpSrc)
     
@@ -64,7 +93,7 @@ class AddrGenerator:
         memoryaddr = onnx.helper.make_attribute("memoryaddr", [self.BufSrc, self.BufDst])
         node.attribute.insert(-1, memoryaddr)
 
-        self.BufDst = self.BufDst + reduce(mul, OfmSize[1:])
+        self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
         # bound check
         self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
 
@@ -80,7 +109,7 @@ class AddrGenerator:
         memoryaddr = onnx.helper.make_attribute("memoryaddr", [self.BufSrc, self.BufDst])
         node.attribute.insert(-1, memoryaddr)
 
-        self.BufDst = self.BufDst + reduce(mul, OfmSize[1:])
+        self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
         self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
 
     # pool
@@ -103,7 +132,7 @@ class AddrGenerator:
         memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc, self.BufDst])
         node.attribute.insert(-1, memoryaddr)
 
-        self.BufDst = self.BufDst + reduce(mul, OfmSize[1:])
+        self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
         self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
 
     # ALU ops like add, sub
@@ -137,10 +166,11 @@ class AddrGenerator:
             memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc1, BufSrc2, self.BufDst])
             node.attribute.insert(-1, memoryaddr)
 
-        self.BufDst = self.BufDst + reduce(mul, OfmSize[1:])
-        self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
 
-    def handle_concat(self, node, OpSrc):
+    def handle_concat(self, node, OpSrc): # TODO
         OfmSize = get_attribute(node, 'ofmsize')
         # If the concatenation has two input nodes
         if len(OpSrc) == 2:
@@ -183,22 +213,174 @@ class AddrGenerator:
 
     def handle_softmax(self, node, OpSrc):
         OfmSize = get_attribute(node, 'ofmsize')
-        BufSrc = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1]
+        BufSrc = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1] # input data
 
         memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc, self.BufDst])
         node.attribute.insert(-1, memoryaddr)
-
-        self.BufDst = self.BufDst + reduce(mul, OfmSize[1:])
-        self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
 
     # interface for future supported operators
     def handle_other(self, node, OpSrc):
         if len(OpSrc) >= 1:
             memoryaddr_attr = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")
-            # Use memoryaddr_attr if not None, otherwise use self.BufDst
+            # Use source op's BufDst as current node's BufSrc if not None, otherwise use self.BufDst
             BufSrc = memoryaddr_attr[-1] if memoryaddr_attr is not None else self.BufDst
         else:
             BufSrc = self.BufDst
-
+        # By default, no GBuffer space is allocated
         memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc, BufSrc])
         node.attribute.insert(-1, memoryaddr)
+
+    def handle_slice(self, node, OpSrc):
+        assert len(OpSrc) >= 3 and len(OpSrc) <= 5, "Slice must contain a minimum of 3 source Ops and a maximum of 5 "
+        OfmSize = get_attribute(node, 'ofmsize')
+        # 3 required OpSrc : data, starts, ends
+        BufAddresses = [get_attribute(self.onnx_model.graph.node[src], "memoryaddr")[-1] for src in OpSrc[:3]]
+        if len(OpSrc) > 3:
+            # 2 optional OpSrc : axes, steps
+            BufAddresses.extend(get_attribute(self.onnx_model.graph.node[src], "memoryaddr")[-1] for src in OpSrc[3:])
+        BufAddresses.append(self.BufDst)
+
+        memoryaddr = onnx.helper.make_attribute("memoryaddr", BufAddresses)
+        node.attribute.insert(-1, memoryaddr)
+
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+    def handle_unsqueeze(self, node, OpSrc):
+        assert len(OpSrc) == 2, "UnSqueeze must contain exactly 2 sources Ops"
+        OfmSize = get_attribute(node, 'ofmsize')
+        BufSrc1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1] # data
+        BufSrc2 = get_attribute(self.onnx_model.graph.node[OpSrc[1]], "memoryaddr")[-1] # axes
+
+        memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc1,BufSrc2,self.BufDst])
+        node.attribute.insert(-1, memoryaddr)
+
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+    def handle_1D_Constant(self, node,node_id,OpSrc):
+        OfmSize = get_attribute(node, 'ofmsize')
+        if node.op_type == "Constant":# Constant
+            BufSrc = self.const_node_output[node_id]['addr']
+            # no data movement for constant nodes, BufDst = BufSrc
+            BufDst = BufSrc
+            memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc, BufDst])
+        else:# Shape, ConstantOfShape, etc.
+            if node.input[0] == 'input':
+                BufSrc = self.BufSrc #TODO
+            else:
+                BufSrc = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1]
+            memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc, self.BufDst])
+        node.attribute.insert(-1, memoryaddr)
+
+        if OpSrc and OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+
+    def handle_transpose(self, node, OpSrc):
+        assert len(OpSrc) == 1, "Transpose must contain exactly 1 sources Ops"
+        OfmSize = get_attribute(node, 'ofmsize')
+        BufSrc = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1] # data
+
+        memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc, self.BufDst])
+        node.attribute.insert(-1, memoryaddr)
+
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+    def handle_reducemean(self, node, OpSrc):
+        assert len(OpSrc) >= 1 and len(OpSrc) <= 2, "ReduceMean must contain a minimum of 1 source Ops and a maximum of 2"
+        OfmSize = get_attribute(node, 'ofmsize')
+        # 1 required OpSrc : data
+        BufAddresses = [get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1]]
+        if len(OpSrc) == 2:
+            # 1 optional OpSrc : axes
+            BufAddresses.extend(get_attribute(self.onnx_model.graph.node[OpSrc[1]], "memoryaddr")[-1])
+        BufAddresses.append(self.BufDst)
+
+        memoryaddr = onnx.helper.make_attribute("memoryaddr", BufAddresses)
+        node.attribute.insert(-1, memoryaddr)
+
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+    def handle_sqrt(self, node, OpSrc):
+        assert len(OpSrc) == 1, "Sqrt must contain exactly 1 sources Ops"
+        OfmSize = get_attribute(node, 'ofmsize')
+        BufSrc = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1] # data
+
+        memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc, self.BufDst])
+        node.attribute.insert(-1, memoryaddr)
+
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+    def handle_gather(self, node, OpSrc):
+        assert len(OpSrc) == 2, "Gather must contain exactly two sources Ops"
+        OfmSize = get_attribute(node, 'ofmsize')
+        BufSrc1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1] # data
+        BufSrc2 = get_attribute(self.onnx_model.graph.node[OpSrc[1]], "memoryaddr")[-1] # indices
+
+        memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc1, BufSrc2,self.BufDst])
+        node.attribute.insert(-1, memoryaddr)
+
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+    def handle_reshape(self, node, OpSrc):
+        assert len(OpSrc) == 2, "Reshape must contain exactly two sources Ops"
+        OfmSize = get_attribute(node, 'ofmsize')
+        BufSrc1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1] # data
+        BufSrc2 = get_attribute(self.onnx_model.graph.node[OpSrc[1]], "memoryaddr")[-1] # shape
+
+        memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc1, BufSrc2,self.BufDst])
+        node.attribute.insert(-1, memoryaddr)
+
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+    def handle_expand(self, node, OpSrc):
+        OfmSize = get_attribute(node, 'ofmsize')
+        if len(OpSrc) == 2: # data and shape come from SrcOp
+            BufSrc1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1] # data
+            BufSrc2 = get_attribute(self.onnx_model.graph.node[OpSrc[1]], "memoryaddr")[-1] # shape
+
+            memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc1, BufSrc2, self.BufDst])
+            node.attribute.insert(-1, memoryaddr)
+        else: # one from initializer
+            BufSrc1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1]
+            # Get srcinit attribute from the current node
+            init_name = get_attribute(node, 'srcinit')
+            # If srcinit exists, consider it as the second input node
+            if init_name:
+                BufSrc2 = self.initializer[init_name.decode("utf-8")]['addr']
+                memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc1, BufSrc2, self.BufDst])
+                node.attribute.insert(-1, memoryaddr)
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
+
+    def handle_where(self, node, OpSrc):
+        assert len(OpSrc) == 3, "Where must contain exactly three sources Ops"
+        OfmSize = get_attribute(node, 'ofmsize')
+        BufSrc1 = get_attribute(self.onnx_model.graph.node[OpSrc[0]], "memoryaddr")[-1] # condition
+        BufSrc2 = get_attribute(self.onnx_model.graph.node[OpSrc[1]], "memoryaddr")[-1] # data_X
+        BufSrc3 = get_attribute(self.onnx_model.graph.node[OpSrc[2]], "memoryaddr")[-1] # data_Y
+
+        memoryaddr = onnx.helper.make_attribute("memoryaddr", [BufSrc1, BufSrc2,BufSrc3,self.BufDst])
+        node.attribute.insert(-1, memoryaddr)
+
+        if OfmSize is not None:
+            self.BufDst = self.BufDst + reduce(mul, OfmSize[:])
+            self.BufDst = self.BufDst if self.BufDst < self.GBSize else self.BufDst % self.GBSize
